@@ -1,0 +1,353 @@
+//+------------------------------------------------------------------+
+//|                      Felix Flag Fucker EA                       |
+//|                       Copyright 2023, Danicos.C                   |
+//+------------------------------------------------------------------+
+#property strict
+
+// Define global variables for Fibonacci and flag objects
+int fiboHandle = 0; // Variable to store the handle of the Fibonacci object
+int flagHandle = 0; // Variable to store the handle of the flag object
+
+// Define input parameters
+extern double LotSize = 0.01;
+extern int StopLossPips = 0; // Stop loss in pips (use 0 for the 0.618 line)
+extern int TakeProfitPips = 0; // Take profit in pips (use 0 for the 0 line)
+extern int FlagMinPips = 30; // Minimum number of pips for a flag
+extern int MA_Period = 20; // Period for the moving average
+extern int MinRetests = 3; // Minimum number of retests within consolidation
+extern double ConsolidationRange = 0.0020; // Define how close prices need to be to the MA for consolidation
+extern int MaxAllowedSpread = 5; // Maximum allowed spread in pips
+extern int BreakoutThresholdPips = 10; // Breakout threshold in pips
+
+// Calendar filter parameters
+extern bool UseCalendarFilter = true; // Enable/disable the calendar filter
+extern string AllowedDates = "2023.09.15,2023.09.20"; // Comma-separated list of allowed dates (YYYY.MM.DD)
+extern string AllowedTimes = "08:00-12:00,14:00-16:00"; // Comma-separated list of allowed times (HH:MM-HH:MM)
+
+// Profit and loss filters
+extern bool EnableMaxAllowedLoss = true; // Enable/disable the MaxAllowedLoss filter
+double MaxAllowedLoss; // Maximum allowed loss based on initial balance
+
+extern bool EnableStopTradingProfit = true; // Enable/disable the StopTradingProfit filter
+double StopTradingProfit; // Desired profit level based on initial balance
+
+// Define an enumeration for trading sessions
+enum ENUM_TradingSessions
+{
+    SydneySession,
+    TokyoSession,
+    LondonSession,
+    NewYorkSession
+};
+
+// Define the trading session parameter
+extern bool EnableTradingSession = true; // Enable/disable trading session filter
+extern ENUM_TradingSessions TradingSession = LondonSession; // Default to London session
+
+// Variables to track flag conditions
+bool bearishFlag = false;
+bool bullishFlag = false;
+
+//+------------------------------------------------------------------+
+//| Expert initialization function                                   |
+//+------------------------------------------------------------------+
+int OnInit()
+{
+    // Calculate the initial balance
+    double initialBalance = AccountBalance();
+    
+    // Set MaxAllowedLoss and StopTradingProfit based on initial balance
+    MaxAllowedLoss = initialBalance * 0.10; // 10% of initial balance
+    StopTradingProfit = initialBalance * 0.05; // 5% of initial balance
+
+    return(INIT_SUCCEEDED);
+}
+
+//+------------------------------------------------------------------+
+//| Expert deinitialization function                                 |
+//+------------------------------------------------------------------+
+void OnDeinit(const int reason)
+{
+    // Deinitialization code here
+}
+
+//+------------------------------------------------------------------+
+//| Expert tick function                                             |
+//+------------------------------------------------------------------+
+void OnTick()
+{
+    string currentTime = GetCurrentTime();
+    int currentDayOfWeek = GetCurrentDayOfWeek();
+    int currentWeekNumber = GetCurrentWeekNumber();
+    
+    // Use currentTime, currentDayOfWeek, currentWeekNumber, and trade session in your trading logic
+    
+    // Check if the trading session filter is enabled
+    if (EnableTradingSession)
+    {
+        // Check the selected trading session in your trading logic
+        switch (TradingSession)
+        {
+            case SydneySession:
+                // Trading logic for the Sydney session
+                break;
+            case TokyoSession:
+                // Trading logic for the Tokyo session
+                break;
+            case LondonSession:
+                // Trading logic for the London session
+                break;
+            case NewYorkSession:
+                // Trading logic for the New York session
+                break;
+        }
+    }
+
+    double currentEquity = AccountEquity();
+
+    // Check if we have reached the desired profit level or the maximum allowed loss
+    if (EnableStopTradingProfit && currentEquity >= StopTradingProfit)
+    {
+        CloseAllTrades(); // Close all open trades
+        DisableTradingForRestOfWeek(); // Disable trading for the rest of the week
+        return; // Stop trading
+    }
+
+    if (EnableMaxAllowedLoss && currentEquity <= MaxAllowedLoss)
+    {
+        CloseAllTrades(); // Close all open trades
+        DisableTradingForRestOfWeek(); // Disable trading for the rest of the week
+        return; // Stop trading
+    }
+
+    if (UseCalendarFilter)
+    {
+        if (!IsCalendarAllowed())
+        {
+            Print("Calendar filter is active. Trading is not allowed at this time.");
+            return; // Skip trading based on the calendar filter
+        }
+    }
+
+    DetectFlagAndTrade();
+}
+
+// Function to close all open trades
+void CloseAllTrades()
+{
+    for (int i = OrdersTotal() - 1; i >= 0; i--)
+    {
+        if (OrderSelect(i, SELECT_BY_POS, MODE_TRADES))
+        {
+            OrderClose(OrderTicket(), OrderLots(), Bid, 0, clrNONE);
+        }
+    }
+}
+
+// Function to disable trading for the rest of the week
+void DisableTradingForRestOfWeek()
+{
+    int currentDayOfWeek = DayOfWeek(TimeCurrent());
+    int daysRemainingInWeek = 5 - currentDayOfWeek; // Assuming a standard trading week from Monday to Friday
+
+    if (daysRemainingInWeek > 0)
+    {
+        datetime endOfTradingWeek = TimeCurrent() + PeriodSeconds(PERIOD_D1) * daysRemainingInWeek;
+        int expirationTime = TimeToInteger(endOfTradingWeek);
+
+        // Set the expiration time for the EA
+        ExpertRemove();
+        ExpertCreate(Symbol(), PERIOD_D1, expirationTime);
+    }
+}
+
+// Function to check if the current time is within any of the predefined custom trade sessions
+bool IsCustomTradeSessionActive(string currentTime)
+{
+    string[] sessionTimes = StringSplit(CustomTradeSessions, ",");
+
+    for (int i = 0; i < ArraySize(sessionTimes); i++)
+    {
+        string[] sessionRange = StringSplit(sessionTimes[i], "-");
+        string sessionStart = StringTrim(sessionRange[0]);
+        string sessionEnd = StringTrim(sessionRange[1]);
+
+        if (IsTimeWithinRange(currentTime, sessionStart, sessionEnd))
+        {
+            return true; // Trading is allowed within the specified session
+        }
+    }
+
+    return false; // Current time is outside of all custom sessions
+}
+
+// Function to check if the current time is within a specified time range
+bool IsTimeWithinRange(string currentTime, string startTime, string endTime)
+{
+    int currentHour = StringToInteger(StringSubstr(currentTime, 0, 2));
+    int currentMinute = StringToInteger(StringSubstr(currentTime, 3, 2));
+    int startHour = StringToInteger(StringSubstr(startTime, 0, 2));
+    int startMinute = StringToInteger(StringSubstr(startTime, 3, 2));
+    int endHour = StringToInteger(StringSubstr(endTime, 0, 2));
+    int endMinute = StringToInteger(StringSubstr(endTime, 3, 2));
+
+    if (currentHour > startHour || (currentHour == startHour && currentMinute >= startMinute))
+    {
+        if (currentHour < endHour || (currentHour == endHour && currentMinute <= endMinute))
+        {
+            return true; // Current time is within the specified range
+        }
+    }
+
+    return false; // Current time is outside of the specified range
+}
+
+// Function to check if the current date and time are allowed based on the calendar filter
+bool IsCalendarAllowed()
+{
+    string currentDate = StringToDate(StringFormat("%04d.%02d.%02d", Year(), Month(), Day()), "YYYY.MM.DD");
+    string[] allowedDates = StringSplit(AllowedDates, ",");
+    string[] allowedTimes = StringSplit(AllowedTimes, ",");
+
+    for (int i = 0; i < ArraySize(allowedDates); i++)
+    {
+        for (int j = 0; j < ArraySize(allowedTimes); j++)
+        {
+            string startDateTime = allowedDates[i] + " " + StringTrim(allowedTimes[j]);
+            string endDateTime = allowedDates[i] + " " + StringTrim(allowedTimes[j + 1]);
+
+            datetime start = StrToTime(startDateTime);
+            datetime end = StrToTime(endDateTime);
+
+            if (TimeCurrent() >= start && TimeCurrent() < end)
+            {
+                return true; // Current date and time are allowed
+            }
+        }
+    }
+
+    return false; // Current date and time are not allowed
+}
+
+// Function to detect a breakout
+bool IsBreakout()
+{
+    double flagHigh = High[1]; // High of the last completed candle (adjust this based on your flag definition)
+    double flagLow = Low[1]; // Low of the last completed candle (adjust this based on your flag definition)
+
+    // Calculate the breakout levels
+    double breakoutAbove = flagHigh + BreakoutThresholdPips * Point;
+    double breakoutBelow = flagLow - BreakoutThresholdPips * Point;
+
+    // Check if the current price is above the breakout level
+    if (Ask >= breakoutAbove)
+    {
+        return true; // Breakout above
+    }
+
+    // Check if the current price is below the breakout level
+    if (Bid <= breakoutBelow)
+    {
+        return true; // Breakout below
+    }
+
+    return false; // No breakout
+}
+
+// Function to detect a retest
+bool IsRetest()
+{
+    // Define your retest logic here
+    // You can use the iMA or other indicators to determine retests
+    // Example: if (iMA(Symbol(), 0, MA_Period, 0, MODE_SMA, PRICE_CLOSE, 1) > OrderOpenPrice())
+    return false; // No retest detected
+}
+
+// Function to detect consolidation
+bool IsConsolidation()
+{
+    // Define your consolidation logic here
+    // You can use the iMA or other indicators to determine consolidation
+    // Example: if (MathAbs(iMA(Symbol(), 0, MA_Period, 0, MODE_SMA, PRICE_CLOSE, 0) - Close[0]) < ConsolidationRange)
+    return false; // No consolidation detected
+}
+
+// Function to detect a bearish flag pattern
+bool IsBearishFlag()
+{
+    // Define your bearish flag logic here
+    // Example: if (IsFlagpole() && IsConsolidation() && Low[0] < Low[1] && Low[1] < Low[2])
+    return false; // No bearish flag detected
+}
+
+// Function to detect a bullish flag pattern
+bool IsBullishFlag()
+{
+    // Define your bullish flag logic here
+    // Example: if (IsFlagpole() && IsConsolidation() && High[0] > High[1] && High[1] > High[2])
+    return false; // No bullish flag detected
+}
+
+// Function to detect a flag pattern and execute a trade
+void DetectFlagAndTrade()
+{
+    if (IsBearishFlag())
+    {
+        if (IsBreakout() && IsRetest())
+        {
+            // Execute a bearish trade
+            // Place your trade execution code here
+        }
+    }
+    else if (IsBullishFlag())
+    {
+        if (IsBreakout() && IsRetest())
+        {
+            // Execute a bullish trade
+            // Place your trade execution code here
+        }
+    }
+}
+
+// Function to get the current time in HH:MM format
+string GetCurrentTime()
+{
+    int hours = Hour();
+    int minutes = Minute();
+    string timeString = StringFormat("%02d:%02d", hours, minutes);
+    return timeString;
+}
+
+// Function to get the current day of the week (0 for Sunday, 1 for Monday, and so on)
+int GetCurrentDayOfWeek()
+{
+    return DayOfWeek();
+}
+
+// Function to get the current week number in the year
+int GetCurrentWeekNumber()
+{
+    int year = Year();
+    int month = Month();
+    int day = Day();
+    
+    // Calculate the week number based on the current date
+    int weekNumber = iWeekNumber(year, month, day);
+    
+    return weekNumber;
+}
+
+// Helper function to calculate the week number based on a date
+int iWeekNumber(int year, int month, int day)
+{
+    datetime date = StrToTime(StringFormat("%04d.%02d.%02d 00:00:00", year, month, day));
+    int dayOfWeek = DayOfWeek(date);
+    int dayOfYear = DayOfYear(date);
+    
+    // Calculate the week number
+    int weekNumber = (dayOfYear - dayOfWeek + 10) / 7;
+    
+    return weekNumber;
+}
+
+// Rest of your code...
